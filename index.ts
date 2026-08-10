@@ -92,6 +92,80 @@ const DISCOVERY_TIMEOUT_MS = 15_000;
 const UNAVAILABLE_BOTS = new Set(["app-creator", "script-bot-creator"]);
 
 /**
+ * Context windows for chat LLMs where Poe's /v1/models reports no
+ * context_window AND the bot description doesn't state one. Sourced from the
+ * model vendors' own entries on models.dev (Z.ai, Moonshot, DeepSeek,
+ * MiniMax, Alibaba, Amazon, Xiaomi, Meta, Mistral, Tencent, OpenAI). Keys are
+ * exact Poe bot ids. Description-stated values (bot-author specific) win over
+ * this table; both win over DEFAULT_CONTEXT_WINDOW.
+ */
+const CONTEXT_OVERRIDES: Record<string, number> = {
+	"glm-4.6": 204_800,
+	"glm-4.7": 204_800,
+	"glm-5": 204_800,
+	"glm-5.1": 200_000,
+	"glm-5.2": 1_000_000,
+	"kimi-k2-thinking": 262_144,
+	"kimi-k2.5": 262_144,
+	"kimi-k2.6": 262_144,
+	"kimi-k2.7-code": 262_144,
+	"deepseek-v3.1": 128_000,
+	"deepseek-v3.1-terminus": 128_000,
+	"deepseek-v3.2": 128_000,
+	"deepseek-v4-pro": 1_000_000,
+	"deepseek-v4-flash": 1_000_000,
+	"minimax-m2": 196_608,
+	"minimax-m2.1": 204_800,
+	"minimax-m2.5": 204_800,
+	"minimax-m2.7": 204_800,
+	"minimax-m2.7-fw": 204_800,
+	"minimax-m3": 1_000_000,
+	"qwen3-max-el": 262_144,
+	"qwen3-max-preview-el": 262_144,
+	"qwen3.5-flash-el": 1_000_000,
+	"qwen3.7-plus": 1_000_000,
+	"qwen3.7-flash-el": 1_000_000,
+	"qwen3.7-max-el": 1_000_000,
+	"qwen3.8-max-el": 1_000_000,
+	"gpt-oss-120b": 131_072,
+	"gpt-oss-20b-t": 131_072,
+	"mimo-v2.5-pro": 1_048_576,
+	"gemma-3-27b": 128_000,
+	hy3: 256_000,
+	"muse-spark-1-1": 1_000_000,
+	"mistral-medium-3.1": 262_144,
+	"nova-pro-1.0": 300_000,
+	"nova-lite-1.0": 300_000,
+	"nova-micro-1.0": 128_000,
+	"nova-premier-1.0": 1_000_000,
+	"nova-lite-2": 1_000_000,
+};
+
+// Ordered context-window patterns for bot descriptions; first match wins.
+// Connectors deliberately exclude newlines so "tokens >128k\n- Context
+// Window: 256k" can't false-match the pricing line.
+const CONTEXT_PATTERNS = [
+	/context[ \t]*window[ \t]*[:=]?[ \t]*(?:up to[ \t]+)?(\d+(?:\.\d+)?)[ \t]*([km])\b/i,
+	/(\d+(?:\.\d+)?)[ \t]*([km])[ \t]*(?:tokens?[ \t]*)?[-–]?[ \t]*context(?:[ \t]window)?/i,
+	/context[ \t]*(?:window)?[ \t]*(?:of|is)?[ \t]*(?:up to[ \t]+)?(\d+(?:\.\d+)?)[ \t]*([km])\b/i,
+];
+
+/** Parse a context window ("1M", "256k") from a bot description, if stated. */
+function parseContextFromDescription(description: string | undefined): number | undefined {
+	if (!description) return undefined;
+	for (const pattern of CONTEXT_PATTERNS) {
+		const match = description.match(pattern);
+		if (match) {
+			const value = Math.round(
+				Number.parseFloat(match[1]) * (match[2].toLowerCase() === "m" ? 1_000_000 : 1_000),
+			);
+			if (value >= 1_000 && value <= 10_000_000) return value;
+		}
+	}
+	return undefined;
+}
+
+/**
  * Build a pi thinkingLevelMap from a Poe bot's enum-valued effort options.
  *
  * Exact matches map to themselves; levels with no exact match are hidden
@@ -264,8 +338,14 @@ async function discoverPoeModels(signal?: AbortSignal): Promise<DiscoveredCatalo
 		if (endpoints.length > 0 && !endpoints.includes("/v1/chat/completions")) continue;
 		if (UNAVAILABLE_BOTS.has(m.id.toLowerCase())) continue;
 
+		// Poe's structured field wins; then the bot description (what the bot
+		// author actually serves); then the curated table; then the default.
 		const contextWindow =
-			m.context_window?.context_length ?? m.context_length ?? DEFAULT_CONTEXT_WINDOW;
+			m.context_window?.context_length ??
+			m.context_length ??
+			parseContextFromDescription(m.description) ??
+			CONTEXT_OVERRIDES[m.id] ??
+			DEFAULT_CONTEXT_WINDOW;
 		const maxTokens = Math.min(
 			contextWindow,
 			m.context_window?.max_output_tokens ?? DEFAULT_MAX_TOKENS,

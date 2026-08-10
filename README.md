@@ -118,9 +118,14 @@ To pick up newly added Poe models, run `/reload` (the factory re-fetches
   (`https://api.poe.com`, Claude models only). It isn't needed here — Claude
   models are reachable through the Chat Completions API like everything else —
   but it's the right choice for Anthropic-SDK-only tools such as Claude Code.
-- Models where Poe reports no context length fall back to a 128k context
-  window (16k max output); the catalog entry always reflects Poe's numbers
-  when available.
+- Context windows come from Poe's structured `context_window` field first.
+  For bots where Poe reports nothing, the bot description is parsed for a
+  stated window (e.g. "Context Window: 256k"), then a curated table covers
+  the remaining well-known chat models (GLM, Kimi, DeepSeek, MiniMax, Qwen,
+  GPT-OSS, MiMo, Gemma, Muse, Mistral, Nova, Hunyuan — sourced from the
+  vendors' models.dev entries). Only genuinely undocumented utility bots
+  (search, transcription, media tools) fall back to a 128k window. Models
+  with no reported output limit get a 16k max output default.
 - Poe charges subscription points rather than per-token USD; the `pricing`
   fields in `/v1/models` are the per-token USD equivalents and are surfaced as
   per-million-token costs in pi.

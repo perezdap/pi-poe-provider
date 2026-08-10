@@ -89,6 +89,33 @@ assert(vision.length > 0, "at least one vision model");
 const sonnet = models.find((m) => m.id === "claude-sonnet-4.6");
 if (sonnet) assert(sonnet.input.includes("image"), "claude-sonnet-4.6 has image input");
 
+// ---- context-window fallback chain (regression: ds-v4-flash-0731-el showed
+// the 128k default despite being a 1M model) ----
+// Poe reports no context_window for these bots; values must come from the
+// description parser or the curated override table, never the 128k default.
+const expectedContext = {
+	"ds-v4-flash-0731-el": 1000000, // description: "1M context window"
+	"seed-2.0-pro": 256000, // description: "Context Window: 256k"
+	"qwen3.6-plus": 1000000, // description: "1M-context" (hyphenated form)
+	"glm-5.2": 1000000, // override (Z.ai: glm-5.2)
+	"glm-4.7": 204800, // override (Z.ai: glm-4.7)
+	"kimi-k2.5": 262144, // override (Moonshot: kimi-k2.5)
+	"deepseek-v3.2": 128000, // override (DeepSeek: v3.2)
+	"muse-spark-1-1": 1000000, // override (Meta: muse-spark-1.1)
+	"nova-premier-1.0": 1000000, // override (Amazon: nova-premier)
+	"gpt-oss-120b": 131072, // override (OpenAI: gpt-oss-120b)
+};
+for (const [id, ctx] of Object.entries(expectedContext)) {
+	const m = models.find((mm) => mm.id === id);
+	if (m) assertEq(m.contextWindow, ctx, `${id} contextWindow = ${ctx} (not the 128k fallback)`);
+}
+// Sanity: nothing registered with an absurd context window. (Small windows are
+// legitimate — Poe reports e.g. 2000 for elevenlabs-music; trust its numbers.)
+for (const m of models) {
+	assert(m.contextWindow >= 1000, `model ${m.id}: contextWindow >= 1000 (got ${m.contextWindow})`);
+	assert(m.contextWindow <= 10_000_000, `model ${m.id}: contextWindow <= 10M (got ${m.contextWindow})`);
+}
+
 // ---- known-model spot checks (live catalog) ----
 
 // Enum-mapped effort model without "none": off falls back to the lowest effort.
