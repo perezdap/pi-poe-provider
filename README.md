@@ -1,0 +1,126 @@
+# pi-poe-provider
+
+A [pi](https://github.com/earendil-works/pi-mono) extension that registers
+**[Poe](https://poe.com)** as a model provider, backed by Poe's
+OpenAI-compatible Chat Completions API (`https://api.poe.com/v1`). One Poe API
+key unlocks hundreds of models and bots — Claude, GPT, Gemini, Grok, Kimi,
+DeepSeek, and more — billed against your existing Poe subscription points.
+
+## Features
+
+- **Correct per-model context windows and capabilities.** The full model
+  catalog — context window, max output tokens, pricing, input modalities
+  (text/image), and reasoning support — is discovered at startup from Poe's
+  public `/v1/models` endpoint, so every model's context window matches what
+  Poe actually advertises.
+- **`/login poe` support.** Prompts for and stores your Poe API key (get one at
+  <https://poe.com/api/keys>), with `POE_API_KEY` as an automatic fallback.
+- **Per-model thinking control, using the knob each bot actually declares:**
+  - `reasoning_effort` (GPT-5.x, Kimi, Grok, Seed, ...) — sent as the
+    OpenAI-compatible top-level field (the same key `extra_body` produces).
+  - `thinking_level` (Gemini 3.x) and `output_effort` (Claude 4.5+) — pi's
+    effort value is renamed to the bot's parameter before the request is sent.
+  - `thinking_budget` (Claude budget models, Gemini 2.5, DeepSeek, ...) — a
+    per-level token budget, clamped to the bot's declared range.
+  - `enable_thinking` (Qwen, Seed, MiMo, ...) — pi's built-in `qwen` thinking
+    format toggles it.
+  - Pi's thinking levels map to exact enum matches; unsupported levels are
+    hidden from the thinking selector. `off` maps to `"none"` when the bot
+    offers it, otherwise to the lowest effort the bot accepts (e.g. Gemini 3
+    cannot disable thinking).
+- **Requests sent exactly as Poe expects:**
+  - `Authorization: Bearer <key>`
+  - `system` role (Poe proxies to heterogeneous backends; `system` is the one
+    role they all accept)
+  - `max_completion_tokens`
+  - `stream_options.include_usage` for streamed token usage
+  - Streamed `reasoning_content` deltas are parsed into pi thinking blocks by
+    the built-in `openai-completions` API
+
+## Install
+
+### As a pi package (recommended)
+
+```sh
+pi install git:github.com/perezdap/pi-poe-provider
+```
+
+This clones the repo and registers the extension from the `pi` manifest in
+`package.json`. Run `pi update --extensions` to pick up new versions.
+
+### Global (all projects), manual
+
+Clone straight into pi's global extensions folder:
+
+```sh
+# Windows (PowerShell)
+git clone https://github.com/perezdap/pi-poe-provider "$env:USERPROFILE\.pi\agent\extensions\poe"
+
+# macOS / Linux
+git clone https://github.com/perezdap/pi-poe-provider ~/.pi/agent/extensions/poe
+```
+
+Then start (or `/reload`) pi. The extension auto-loads from
+`~/.pi/agent/extensions/poe/index.ts`.
+
+### Project-local
+
+Clone into `<project>/.pi/extensions/poe/` instead. Project-local extensions
+load only after the project is trusted.
+
+### Quick test (no install)
+
+```sh
+pi -e ./index.ts
+```
+
+## Use
+
+```
+/login poe           # enter your Poe API key (or export POE_API_KEY first)
+/model poe/<id>      # pick a model, e.g. poe/Claude-Sonnet-4.6
+```
+
+Set pi's default model in `settings.json` if desired:
+
+```jsonc
+{ "defaultProvider": "poe", "defaultModel": "Claude-Sonnet-4.6" }
+```
+
+To pick up newly added Poe models, run `/reload` (the factory re-fetches
+`/v1/models`).
+
+## How it works
+
+- **Streaming/API:** uses pi's built-in `openai-completions` API. Poe is
+  OpenAI-compatible, so no custom streaming code is needed; pi already parses
+  `reasoning_content`, tool calls, usage, and `stop` reasons.
+- **Auth:** `envApiKeyAuth("Poe API key", ["POE_API_KEY"])` — stored
+  credential wins, then `POE_API_KEY` env var.
+- **Model discovery:** `GET https://api.poe.com/v1/models` (no auth required),
+  filtered to text-output bots that support Chat Completions (bots with an
+  empty `supported_endpoints` list use Poe's default chat interface and are
+  included). The App-Creator and Script-Bot-Creator bots are excluded —
+  [documented](https://creator.poe.com/docs/external-applications/openai-compatible-api)
+  as unavailable through this API.
+- **Thinking parameters:** `thinking_level` / `output_effort` renaming and
+  `thinking_budget` injection happen in a `before_provider_request` handler
+  scoped to `provider === "poe"`.
+
+## Notes
+
+- Poe's `/v1/models` endpoint requires no auth, so models load even before you
+  run `/login`. Requests, however, need a key.
+- This extension only wires up text (chat-completion) models. Poe's image,
+  video, and audio generation bots are excluded.
+- Poe also offers an
+  [Anthropic-compatible endpoint](https://creator.poe.com/docs/external-applications/anthropic-compatible-api)
+  (`https://api.poe.com`, Claude models only). It isn't needed here — Claude
+  models are reachable through the Chat Completions API like everything else —
+  but it's the right choice for Anthropic-SDK-only tools such as Claude Code.
+- Models where Poe reports no context length fall back to a 128k context
+  window (16k max output); the catalog entry always reflects Poe's numbers
+  when available.
+- Poe charges subscription points rather than per-token USD; the `pricing`
+  fields in `/v1/models` are the per-token USD equivalents and are surfaced as
+  per-million-token costs in pi.

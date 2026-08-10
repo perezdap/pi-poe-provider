@@ -1,0 +1,21 @@
+{
+  "name": "pi-poe-provider",
+  "version": "0.1.0",
+  "description": "Poe provider extension for pi (OpenAI-compatible chat completions, per-model context windows and capabilities, /login support).",
+  "type": "module",
+  "main": "index.ts",
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
+  "keywords": ["pi", "pi-package", "pi-extension", "poe", "provider", "llm"],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/perezdap/pi-poe-provider.git"
+  },
+  "homepage": "https://github.com/perezdap/pi-poe-provider",
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}
