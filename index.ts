@@ -20,22 +20,20 @@
  *
  * Thinking control is per model, derived from the bot's declared `parameters`:
  *
- *   - `reasoning_effort` enum (GPT-5.x, Kimi, Grok, Seed, ...) is sent as the
- *     OpenAI-compatible top-level `reasoning_effort` field — the documented
- *     extra_body mechanism, which is the same JSON key when the payload is
- *     built directly. Pi levels map to exact enum matches; "off" maps to
- *     "none" when offered, otherwise to the lowest offered effort.
- *   - `thinking_level` (Gemini 3.x) and `output_effort` (Claude 4.5+) enums
- *     use the same mapping, then a before_provider_request hook renames the
- *     outgoing `reasoning_effort` key to the parameter the bot actually
- *     declares.
+ *   - `reasoning_effort` enum (GPT-5.x, Kimi, Grok, Seed, ...) is moved into
+ *     Poe's documented `extra_body` object. Pi levels map to exact enum
+ *     matches; "off" maps to "none" when offered, otherwise to the lowest
+ *     offered effort.
+ *   - `thinking_level` (Gemini 3.x), `output_effort` (Claude 4.5+), and
+ *     `effort` enums use the same mapping, then a before_provider_request hook
+ *     moves the value into `extra_body` under the parameter the bot declares.
  *   - `thinking_budget` numeric knobs (Claude 4.5 budget models, Gemini 2.5,
  *     DeepSeek, ...) get a token budget from a per-level ladder, clamped to
  *     the bot's declared [min, max]; "off" sends 0 when the bot allows it.
- *   - `enable_thinking` boolean (Qwen, Seed, MiMo, ...) uses pi's built-in
- *     "qwen" thinking format (`enable_thinking: true/false`); models that
- *     also declare `reasoning_effort` get both, and models that also declare
- *     `thinking_budget` get a clamped budget injected for non-off levels.
+ *   - Boolean toggles (`enable_thinking`, `enable_reasoning`,
+ *     `reasoning_enabled`, or `deep_thinking`) use pi's built-in "qwen"
+ *     thinking format to produce an on/off value, which is renamed as needed;
+ *     models that also declare `reasoning_effort` or `thinking_budget` get it.
  *   - Models Poe marks `supports_reasoning_effort` without declaring a
  *     parameter get OpenAI-style pass-through effort.
  *
@@ -254,10 +252,15 @@ interface PoeModel {
 /** How pi drives a model's thinking, derived from the bot's declared parameters. */
 type ThinkingControl =
 	| { kind: "reasoning_effort" } // pi's generic path sends top-level reasoning_effort
-	| { kind: "rename"; param: "thinking_level" | "output_effort" } // hook renames reasoning_effort
+	| { kind: "rename"; param: "thinking_level" | "output_effort" | "effort" } // hook moves/renames effort
 	| { kind: "budget"; min: number; max: number } // hook injects thinking_budget
 	// compat "qwen" (+ reasoning_effort, + thinking_budget via hook)
-	| { kind: "enable_thinking"; withEffort: boolean; budget?: { min: number; max: number } }
+	| {
+			kind: "enable_thinking";
+			param: "enable_thinking" | "enable_reasoning" | "reasoning_enabled" | "deep_thinking";
+			withEffort: boolean;
+			budget?: { min: number; max: number };
+	  }
 	| { kind: "effort_passthrough" } // Poe says effort is supported, no enum declared
 	| { kind: "none" };
 
@@ -278,8 +281,10 @@ function resolveThinkingControl(m: PoeModel): { control: ThinkingControl; effort
 	const find = (name: string) => params.find((p) => p.name === name);
 
 	const effort = find("reasoning_effort")?.schema?.enum;
-	const enableThinking = !!find("enable_thinking");
-	if (enableThinking) {
+	const booleanParam = (["enable_thinking", "enable_reasoning", "reasoning_enabled", "deep_thinking"] as const).find(
+		(name) => find(name)?.schema?.type === "boolean" || !!find(name),
+	);
+	if (booleanParam) {
 		// qwen format sends enable_thinking; reasoning_effort rides along when
 		// declared. A declared thinking_budget is honored too: the hook injects a
 		// clamped budget for non-off levels (enable_thinking stays the off switch —
@@ -291,7 +296,7 @@ function resolveThinkingControl(m: PoeModel): { control: ThinkingControl; effort
 				? { min: budgetParam.schema?.minimum ?? m.reasoning?.budget?.min_tokens ?? 0, max: budgetMax }
 				: undefined;
 		return {
-			control: { kind: "enable_thinking", withEffort: !!effort, ...(budget ? { budget } : {}) },
+			control: { kind: "enable_thinking", param: booleanParam, withEffort: !!effort, ...(budget ? { budget } : {}) },
 			effortEnum: effort,
 		};
 	}
@@ -302,6 +307,9 @@ function resolveThinkingControl(m: PoeModel): { control: ThinkingControl; effort
 
 	const outputEffort = find("output_effort")?.schema?.enum;
 	if (outputEffort?.length) return { control: { kind: "rename", param: "output_effort" }, effortEnum: outputEffort };
+
+	const plainEffort = find("effort")?.schema?.enum;
+	if (plainEffort?.length) return { control: { kind: "rename", param: "effort" }, effortEnum: plainEffort };
 
 	const budget = find("thinking_budget");
 	if (budget) {
@@ -346,9 +354,15 @@ async function discoverPoeModels(signal?: AbortSignal): Promise<DiscoveredCatalo
 			parseContextFromDescription(m.description) ??
 			CONTEXT_OVERRIDES[m.id] ??
 			DEFAULT_CONTEXT_WINDOW;
+		const declaredOutputLimit = (m.parameters ?? []).find(
+			(p) =>
+				(p.name === "max_output_tokens" || p.name === "max_tokens" || p.name === "max_completion_tokens") &&
+				p.schema?.type === "number" &&
+				typeof p.schema.maximum === "number",
+		)?.schema?.maximum;
 		const maxTokens = Math.min(
 			contextWindow,
-			m.context_window?.max_output_tokens ?? DEFAULT_MAX_TOKENS,
+			m.context_window?.max_output_tokens ?? declaredOutputLimit ?? DEFAULT_MAX_TOKENS,
 		);
 		const input: ("text" | "image")[] = m.architecture?.input_modalities?.includes("image")
 			? ["text", "image"]
@@ -399,6 +413,9 @@ async function discoverPoeModels(signal?: AbortSignal): Promise<DiscoveredCatalo
 				// Both fields are supported; use the modern one.
 				maxTokensField: "max_completion_tokens" as const,
 				supportsReasoningEffort: sendsEffort,
+				// Poe ignores function-tool `strict`; do not advertise schema guarantees.
+				supportsStrictMode: false,
+				supportsUsageInStreaming: true,
 				...(control.kind === "enable_thinking" ? { thinkingFormat: "qwen" as const } : {}),
 			},
 		} as unknown as Model<Api>;
@@ -437,40 +454,55 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		}),
 	);
 
-	// Translate pi's generic reasoning_effort payload field into the parameter
-	// name each bot actually declares, and inject thinking_budget values.
-	// Scoped to the poe provider so unrelated providers are untouched. Runs per
-	// request; returning a new payload replaces the outgoing body.
-	pi.on("before_provider_request", ((event: { payload: unknown }, ctx: { model?: { provider?: string; id?: string }; thinkingLevel?: string }) => {
+	// Poe documents model-specific parameters under `extra_body`; top-level
+	// `reasoning_effort` is explicitly ignored by Chat Completions. Move pi's
+	// generated thinking fields there and rename them when a bot uses another
+	// parameter name. Scoped to Poe so unrelated providers are untouched.
+	pi.on("before_provider_request", ((
+		event: { payload: unknown },
+		ctx: { model?: { provider?: string; id?: string }; thinkingLevel?: string },
+	) => {
 		const model = ctx.model;
 		if (model?.provider !== PROVIDER_ID) return;
 		const payload = event.payload as Record<string, unknown> | null;
 		if (!payload || typeof payload !== "object") return;
 		const control = model.id ? catalog.controls.get(model.id) : undefined;
-		if (!control) return;
+		if (!control || control.kind === "none") return;
 
-		if (control.kind === "rename") {
-			// pi already clamped the level and mapped it through thinkingLevelMap;
-			// only the key name is wrong for this bot.
-			const effort = payload.reasoning_effort;
-			if (typeof effort !== "string") return;
-			const next = { ...payload, [control.param]: effort };
-			delete next.reasoning_effort;
-			return next;
-		}
+		const existingExtra = payload.extra_body;
+		const extraBody: Record<string, unknown> =
+			existingExtra && typeof existingExtra === "object" && !Array.isArray(existingExtra)
+				? { ...(existingExtra as Record<string, unknown>) }
+				: {};
+		const next: Record<string, unknown> = { ...payload, extra_body: extraBody };
+		let changed = false;
+		const move = (source: string, destination = source): void => {
+			if (!(source in next)) return;
+			extraBody[destination] = next[source];
+			delete next[source];
+			changed = true;
+		};
 
-		if (control.kind === "budget") {
+		if (control.kind === "reasoning_effort" || control.kind === "effort_passthrough") {
+			move("reasoning_effort");
+		} else if (control.kind === "rename") {
+			move("reasoning_effort", control.param);
+		} else if (control.kind === "budget") {
 			const level = ctx.thinkingLevel;
-			if (!level) return; // unknown level: leave the bot's default budget alone
-			return { ...payload, thinking_budget: budgetForLevel(level, control.min, control.max) };
+			if (level) {
+				extraBody.thinking_budget = budgetForLevel(level, control.min, control.max);
+				changed = true;
+			}
+		} else if (control.kind === "enable_thinking") {
+			move("enable_thinking", control.param);
+			if (control.withEffort) move("reasoning_effort");
+			const level = ctx.thinkingLevel;
+			if (control.budget && level && level !== "off") {
+				extraBody.thinking_budget = budgetForLevel(level, control.budget.min, control.budget.max);
+				changed = true;
+			}
 		}
 
-		if (control.kind === "enable_thinking" && control.budget) {
-			// pi's qwen format already sends enable_thinking (false at "off", which
-			// needs no budget); add the level's budget for thinking-enabled levels.
-			const level = ctx.thinkingLevel;
-			if (!level || level === "off") return;
-			return { ...payload, thinking_budget: budgetForLevel(level, control.budget.min, control.budget.max) };
-		}
+		return changed ? next : undefined;
 	}) as never);
 }

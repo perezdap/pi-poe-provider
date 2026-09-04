@@ -16,14 +16,17 @@ DeepSeek, and more — billed against your existing Poe subscription points.
 - **`/login poe` support.** Prompts for and stores your Poe API key (get one at
   <https://poe.com/api/keys>), with `POE_API_KEY` as an automatic fallback.
 - **Per-model thinking control, using the knob each bot actually declares:**
-  - `reasoning_effort` (GPT-5.x, Kimi, Grok, Seed, ...) — sent as the
-    OpenAI-compatible top-level field (the same key `extra_body` produces).
-  - `thinking_level` (Gemini 3.x) and `output_effort` (Claude 4.5+) — pi's
-    effort value is renamed to the bot's parameter before the request is sent.
+  - `reasoning_effort` (GPT-5.x, Kimi, Grok, Seed, ...) — sent inside Poe's
+    documented `extra_body` object (the top-level Chat Completions field is
+    ignored by Poe).
+  - `thinking_level` (Gemini 3.x), `output_effort` (Claude 4.5+), and `effort`
+    — pi's effort value is moved into `extra_body` under the bot's declared
+    parameter name.
   - `thinking_budget` (Claude budget models, Gemini 2.5, DeepSeek, ...) — a
     per-level token budget, clamped to the bot's declared range.
-  - `enable_thinking` (Qwen, Seed, MiMo, ...) — pi's built-in `qwen` thinking
-    format toggles it.
+  - Boolean toggles such as `enable_thinking`, `enable_reasoning`,
+    `reasoning_enabled`, and `deep_thinking` — pi's built-in `qwen` thinking
+    format supplies the on/off value, renamed to the bot's declared parameter.
   - Pi's thinking levels map to exact enum matches; unsupported levels are
     hidden from the thinking selector. `off` maps to `"none"` when the bot
     offers it, otherwise to the lowest effort the bot accepts (e.g. Gemini 3
@@ -36,6 +39,7 @@ DeepSeek, and more — billed against your existing Poe subscription points.
   - `stream_options.include_usage` for streamed token usage
   - Streamed `reasoning_content` deltas are parsed into pi thinking blocks by
     the built-in `openai-completions` API
+  - Function-tool `strict` mode is disabled because Poe currently ignores it
 
 ## Install
 
@@ -103,9 +107,9 @@ To pick up newly added Poe models, run `/reload` (the factory re-fetches
   included). The App-Creator and Script-Bot-Creator bots are excluded —
   [documented](https://creator.poe.com/docs/external-applications/openai-compatible-api)
   as unavailable through this API.
-- **Thinking parameters:** `thinking_level` / `output_effort` renaming and
-  `thinking_budget` injection happen in a `before_provider_request` handler
-  scoped to `provider === "poe"`.
+- **Thinking parameters:** model-specific controls are moved into Poe's
+  `extra_body` object; parameter renaming and `thinking_budget` injection happen
+  in a `before_provider_request` handler scoped to `provider === "poe"`.
 
 ## Notes
 
@@ -113,6 +117,10 @@ To pick up newly added Poe models, run `/reload` (the factory re-fetches
   run `/login`. Requests, however, need a key.
 - This extension only wires up text (chat-completion) models. Poe's image,
   video, and audio generation bots are excluded.
+- Poe also supports `/v1/responses`, including hosted web search and structured
+  outputs. This extension intentionally uses Chat Completions because pi needs
+  portable function tools and full local conversation replay; Poe's Chat
+  Completions endpoint supports both.
 - Poe also offers an
   [Anthropic-compatible endpoint](https://creator.poe.com/docs/external-applications/anthropic-compatible-api)
   (`https://api.poe.com`, Claude models only). It isn't needed here — Claude

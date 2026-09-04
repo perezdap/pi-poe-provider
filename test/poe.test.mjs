@@ -2,8 +2,7 @@
 // fetches Poe's live /v1/models catalog), and asserts the model mapping and
 // the before_provider_request hook behave correctly.
 //
-// Run:  node test/poe.test.mjs   (from the repo root, with the junctions
-// in ./node_modules/@earendil-works created by the setup step — see README)
+// Run from the repository root: npm install && npm test
 
 let pass = 0;
 let fail = 0;
@@ -67,6 +66,8 @@ for (const m of models) {
 	assertEq(m.compat?.supportsDeveloperRole, false, `model ${m.id}: supportsDeveloperRole=false (system role)`);
 	assertEq(m.compat?.supportsStore, false, `model ${m.id}: supportsStore=false`);
 	assertEq(m.compat?.maxTokensField, "max_completion_tokens", `model ${m.id}: maxTokensField`);
+	assertEq(m.compat?.supportsStrictMode, false, `model ${m.id}: supportsStrictMode=false`);
+	assertEq(m.compat?.supportsUsageInStreaming, true, `model ${m.id}: streaming usage enabled`);
 	// Unsupported levels must be hidden (null), never sent raw.
 	for (const lvl of ["minimal", "low", "medium", "high", "xhigh", "max"]) {
 		const v = m.thinkingLevelMap?.[lvl];
@@ -97,11 +98,11 @@ const expectedContext = {
 	"ds-v4-flash-0731-el": 1000000, // description: "1M context window"
 	"seed-2.0-pro": 256000, // description: "Context Window: 256k"
 	"qwen3.6-plus": 1000000, // description: "1M-context" (hyphenated form)
-	"glm-5.2": 1000000, // override (Z.ai: glm-5.2)
-	"glm-4.7": 204800, // override (Z.ai: glm-4.7)
+	"glm-5.2": 256000, // Poe structured field (wins over the legacy override)
+	"glm-4.7": 200000, // Poe structured field (wins over the legacy override)
 	"kimi-k2.5": 262144, // override (Moonshot: kimi-k2.5)
 	"deepseek-v3.2": 128000, // override (DeepSeek: v3.2)
-	"muse-spark-1-1": 1000000, // override (Meta: muse-spark-1.1)
+	"muse-spark-1-1": 1048576, // Poe structured field
 	"nova-premier-1.0": 1000000, // override (Amazon: nova-premier)
 	"gpt-oss-120b": 131072, // override (OpenAI: gpt-oss-120b)
 };
@@ -117,6 +118,10 @@ for (const m of models) {
 }
 
 // ---- known-model spot checks (live catalog) ----
+
+// A declared numeric output-token parameter fills a missing structured limit.
+const qwen35 = models.find((m) => m.id === "qwen3.5-397b-a17b");
+if (qwen35) assertEq(qwen35.maxTokens, 64000, "qwen3.5-397b-a17b maxTokens from declared parameter");
 
 // Enum-mapped effort model without "none": off falls back to the lowest effort.
 const kimi = models.find((m) => m.id === "kimi-k3");
@@ -176,6 +181,13 @@ if (qwen) {
 	assertEq(qwen.reasoning, true, "qwen3.5-plus-el reasoning");
 }
 
+// Alternate boolean thinking knob: generated enable_thinking is renamed.
+const nova = models.find((m) => m.id === "nova-lite-2");
+if (nova) {
+	assertEq(nova.compat.thinkingFormat, "qwen", "nova-lite-2 thinkingFormat=qwen");
+	assertEq(nova.reasoning, true, "nova-lite-2 reasoning");
+}
+
 // enable_thinking + thinking_budget model: qwen format AND budget injection.
 const ds = models.find((m) => m.id === "deepseek-v3.2-el");
 if (ds) {
@@ -193,22 +205,30 @@ function runHook(model, thinkingLevel, payload) {
 
 // Non-poe provider: untouched.
 assertEq(runHook({ provider: "openai", id: "gpt-4" }, "medium", { model: "x", messages: [] }), undefined, "non-poe provider untouched");
-// Poe model without a hook-managed control: untouched.
+// A managed Poe model is untouched when pi emitted no custom control field.
 if (kimi) {
-	assertEq(runHook({ provider: "poe", id: "kimi-k3" }, "high", { model: "kimi-k3" }), undefined, "reasoning_effort model untouched by hook");
+	assertEq(runHook({ provider: "poe", id: "kimi-k3" }, "high", { model: "kimi-k3" }), undefined, "reasoning model with no effort field is untouched");
 }
 
-// Rename control: reasoning_effort -> thinking_level / output_effort.
+// Poe custom controls must be nested under extra_body. The documented
+// top-level reasoning_effort field is ignored by Chat Completions.
+if (kimi) {
+	const out = runHook({ provider: "poe", id: "kimi-k3" }, "high", { model: "kimi-k3", reasoning_effort: "high" });
+	assertEq(out.reasoning_effort, undefined, "kimi: top-level reasoning_effort removed");
+	assertEq(out.extra_body.reasoning_effort, "high", "kimi: reasoning_effort moved to extra_body");
+}
+
+// Rename control: reasoning_effort -> extra_body.thinking_level/output_effort.
 if (gemini) {
 	const out = runHook({ provider: "poe", id: "gemini-3.1-pro" }, "high", { model: "gemini-3.1-pro", messages: [], reasoning_effort: "high" });
 	assert(!!out, "gemini hook returns payload");
-	assertEq(out.thinking_level, "high", "gemini: reasoning_effort renamed to thinking_level");
-	assertEq(out.reasoning_effort, undefined, "gemini: reasoning_effort removed");
+	assertEq(out.extra_body.thinking_level, "high", "gemini: effort moved to extra_body.thinking_level");
+	assertEq(out.reasoning_effort, undefined, "gemini: top-level reasoning_effort removed");
 	assertEq(out.model, "gemini-3.1-pro", "gemini: other payload fields preserved");
 }
 if (opus) {
 	const out = runHook({ provider: "poe", id: "claude-opus-4.7" }, "off", { model: "claude-opus-4.7", messages: [], reasoning_effort: "none" });
-	assertEq(out.output_effort, "none", "opus @ off: output_effort=none");
+	assertEq(out.extra_body.output_effort, "none", "opus @ off: extra_body.output_effort=none");
 	assertEq(out.reasoning_effort, undefined, "opus: reasoning_effort removed");
 	// No effort in payload (e.g. map gap): hook leaves it alone.
 	assertEq(runHook({ provider: "poe", id: "claude-opus-4.7" }, "high", { model: "x" }), undefined, "opus: no reasoning_effort -> untouched");
@@ -218,25 +238,35 @@ if (opus) {
 if (sonnet45) {
 	// claude-sonnet-4.5 declares thinking_budget [0, 31999].
 	const off = runHook({ provider: "poe", id: "claude-sonnet-4.5" }, "off", { model: "claude-sonnet-4.5", messages: [] });
-	assertEq(off.thinking_budget, 0, "budget model @ off: thinking_budget=0");
+	assertEq(off.extra_body.thinking_budget, 0, "budget model @ off: extra_body.thinking_budget=0");
 	const med = runHook({ provider: "poe", id: "claude-sonnet-4.5" }, "medium", { model: "claude-sonnet-4.5", messages: [] });
-	assertEq(med.thinking_budget, 8192, "budget model @ medium: 8192");
+	assertEq(med.extra_body.thinking_budget, 8192, "budget model @ medium: 8192");
 	const max = runHook({ provider: "poe", id: "claude-sonnet-4.5" }, "max", { model: "claude-sonnet-4.5", messages: [] });
-	assertEq(max.thinking_budget, 31999, "budget model @ max: clamped to declared maximum");
+	assertEq(max.extra_body.thinking_budget, 31999, "budget model @ max: clamped to declared maximum");
 	const none = runHook({ provider: "poe", id: "claude-sonnet-4.5" }, undefined, { model: "claude-sonnet-4.5", messages: [] });
 	assertEq(none, undefined, "budget model: undefined level -> untouched");
 }
 
-// enable_thinking + budget: budget injected for non-off levels, off untouched
-// (pi's qwen format already sends enable_thinking=false).
+if (nova) {
+	const out = runHook({ provider: "poe", id: "nova-lite-2" }, "off", { model: "nova-lite-2", enable_thinking: false });
+	assertEq(out.enable_thinking, undefined, "alternate boolean: generated top-level toggle removed");
+	assertEq(out.extra_body.enable_reasoning, false, "alternate boolean: renamed and moved to extra_body");
+}
+
+// enable_thinking + budget: budget injected for non-off levels and the toggle
+// moved into extra_body.
 if (ds) {
 	// deepseek-v3.2-el declares thinking_budget [1, 393216].
-	const high = runHook({ provider: "poe", id: "deepseek-v3.2-el" }, "high", { model: "deepseek-v3.2-el", messages: [] });
-	assertEq(high.thinking_budget, 16384, "enable_thinking+budget @ high: 16384");
+	const high = runHook({ provider: "poe", id: "deepseek-v3.2-el" }, "high", { model: "deepseek-v3.2-el", messages: [], enable_thinking: true });
+	assertEq(high.enable_thinking, undefined, "enable_thinking removed from top level");
+	assertEq(high.extra_body.enable_thinking, true, "enable_thinking moved to extra_body");
+	assertEq(high.extra_body.thinking_budget, 16384, "enable_thinking+budget @ high: 16384");
 	const minimal = runHook({ provider: "poe", id: "deepseek-v3.2-el" }, "minimal", { model: "deepseek-v3.2-el", messages: [] });
-	assertEq(minimal.thinking_budget, 1024, "enable_thinking+budget @ minimal: 1024 (clamped >= min 1)");
-	const off = runHook({ provider: "poe", id: "deepseek-v3.2-el" }, "off", { model: "deepseek-v3.2-el", messages: [] });
-	assertEq(off, undefined, "enable_thinking+budget @ off: untouched (qwen sends enable_thinking=false)");
+	assertEq(minimal.extra_body.thinking_budget, 1024, "enable_thinking+budget @ minimal: 1024 (clamped >= min 1)");
+	const off = runHook({ provider: "poe", id: "deepseek-v3.2-el" }, "off", { model: "deepseek-v3.2-el", messages: [], enable_thinking: false });
+	assertEq(off.enable_thinking, undefined, "enable_thinking+budget @ off: top-level toggle removed");
+	assertEq(off.extra_body.enable_thinking, false, "enable_thinking+budget @ off: false moved to extra_body");
+	assertEq(off.extra_body.thinking_budget, undefined, "enable_thinking+budget @ off: no budget needed");
 }
 
 // ---- auth: /login flow + env fallback + stored credential ----

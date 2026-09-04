@@ -1,9 +1,16 @@
 {
   "name": "pi-poe-provider",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Poe provider extension for pi (OpenAI-compatible chat completions, per-model context windows and capabilities, /login support).",
   "type": "module",
   "main": "index.ts",
+  "scripts": {
+    "test": "node test/poe.test.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=20"
+  },
   "pi": {
     "extensions": ["./index.ts"]
   },
@@ -15,7 +22,12 @@
   },
   "homepage": "https://github.com/perezdap/pi-poe-provider",
   "peerDependencies": {
-    "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-coding-agent": "*"
+    "@earendil-works/pi-ai": ">=0.85.0",
+    "@earendil-works/pi-coding-agent": ">=0.85.0"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "^0.85.0",
+    "@earendil-works/pi-coding-agent": "^0.85.0",
+    "typescript": "^5.9.3"
   }
 }
